@@ -23,7 +23,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.apache.iceberg.InternalTestHelpers;
@@ -54,52 +58,52 @@ import org.junit.jupiter.params.provider.FieldSource;
 
 public class TestVariantWriters {
   private static final Schema SCHEMA =
-      new Schema(
-          Types.NestedField.required(1, "id", Types.IntegerType.get()),
-          Types.NestedField.required(2, "var", Types.VariantType.get()));
+      new Schema(Types.NestedField.required(1, "id", Types.IntegerType.get()),
+                 Types.NestedField.required(2, "var", Types.VariantType.get()));
 
   private static final GenericRecord RECORD = GenericRecord.create(SCHEMA);
 
   private static final ByteBuffer TEST_METADATA_BUFFER =
-      VariantTestUtil.createMetadata(ImmutableList.of("a", "b", "c", "d", "e"), true);
+      VariantTestUtil.createMetadata(ImmutableList.of("a", "b", "c", "d", "e"),
+                                     true);
   private static final ByteBuffer TEST_OBJECT_BUFFER =
       VariantTestUtil.createObject(
           TEST_METADATA_BUFFER,
-          ImmutableMap.of(
-              "a", Variants.ofNull(),
-              "d", Variants.of("iceberg")));
+          ImmutableMap.of("a", Variants.ofNull(), "d", Variants.of("iceberg")));
   private static final ByteBuffer SIMILAR_OBJECT_BUFFER =
-      VariantTestUtil.createObject(
-          TEST_METADATA_BUFFER,
-          ImmutableMap.of(
-              "a", Variants.of(123456789),
-              "c", Variants.of("string")));
+      VariantTestUtil.createObject(TEST_METADATA_BUFFER,
+                                   ImmutableMap.of("a", Variants.of(123456789),
+                                                   "c", Variants.of("string")));
   private static final ByteBuffer EMPTY_OBJECT_BUFFER =
       VariantTestUtil.createObject(TEST_METADATA_BUFFER, ImmutableMap.of());
   private static final ByteBuffer ARRAY_IN_OBJECT_BUFFER =
       VariantTestUtil.createObject(
           TEST_METADATA_BUFFER,
           ImmutableMap.of(
-              "a", Variants.of(123456789),
-              "c", array(Variants.of("string"), Variants.of("iceberg"))));
+              "a", Variants.of(123456789), "c",
+              array(Variants.of("string"), Variants.of("iceberg"))));
 
   private static final VariantMetadata EMPTY_METADATA =
       Variants.metadata(VariantTestUtil.emptyMetadata());
-  private static final VariantMetadata TEST_METADATA = Variants.metadata(TEST_METADATA_BUFFER);
+  private static final VariantMetadata TEST_METADATA =
+      Variants.metadata(TEST_METADATA_BUFFER);
   private static final VariantObject TEST_OBJECT =
-      (VariantObject) Variants.value(TEST_METADATA, TEST_OBJECT_BUFFER);
+      (VariantObject)Variants.value(TEST_METADATA, TEST_OBJECT_BUFFER);
   private static final VariantObject SIMILAR_OBJECT =
-      (VariantObject) Variants.value(TEST_METADATA, SIMILAR_OBJECT_BUFFER);
+      (VariantObject)Variants.value(TEST_METADATA, SIMILAR_OBJECT_BUFFER);
   private static final VariantObject EMPTY_OBJECT =
-      (VariantObject) Variants.value(TEST_METADATA, EMPTY_OBJECT_BUFFER);
+      (VariantObject)Variants.value(TEST_METADATA, EMPTY_OBJECT_BUFFER);
   private static final VariantObject ARRAY_IN_OBJECT =
-      (VariantObject) Variants.value(TEST_METADATA, ARRAY_IN_OBJECT_BUFFER);
+      (VariantObject)Variants.value(TEST_METADATA, ARRAY_IN_OBJECT_BUFFER);
 
-  private static final ByteBuffer EMPTY_ARRAY_BUFFER = VariantTestUtil.createArray();
+  private static final ByteBuffer EMPTY_ARRAY_BUFFER =
+      VariantTestUtil.createArray();
   private static final ByteBuffer TEST_ARRAY_BUFFER =
-      VariantTestUtil.createArray(Variants.of("iceberg"), Variants.of("string"));
+      VariantTestUtil.createArray(Variants.of("iceberg"),
+                                  Variants.of("string"));
   private static final ByteBuffer MIXED_TYPE_ARRAY_BUFFER =
-      VariantTestUtil.createArray(Variants.of("iceberg"), Variants.of("string"), Variants.of(34));
+      VariantTestUtil.createArray(Variants.of("iceberg"), Variants.of("string"),
+                                  Variants.of(34));
   private static final ByteBuffer NESTED_ARRAY_BUFFER =
       VariantTestUtil.createArray(
           array(Variants.of("string"), Variants.of("iceberg")),
@@ -107,87 +111,94 @@ public class TestVariantWriters {
   private static final ByteBuffer MIXED_NESTED_ARRAY_BUFFER =
       VariantTestUtil.createArray(
           array(Variants.of("string"), Variants.of("iceberg"), Variants.of(34)),
-          array(Variants.of(34), Variants.ofNull()),
-          array(),
+          array(Variants.of(34), Variants.ofNull()), array(),
           array(Variants.of("string"), Variants.of("iceberg")),
           Variants.of(34));
   private static final ByteBuffer OBJECT_IN_ARRAY_BUFFER =
       VariantTestUtil.createArray(SIMILAR_OBJECT, SIMILAR_OBJECT);
   private static final ByteBuffer MIXED_OBJECT_IN_ARRAY_BUFFER =
-      VariantTestUtil.createArray(
-          SIMILAR_OBJECT, SIMILAR_OBJECT, Variants.of("iceberg"), Variants.of(34));
+      VariantTestUtil.createArray(SIMILAR_OBJECT, SIMILAR_OBJECT,
+                                  Variants.of("iceberg"), Variants.of(34));
 
   private static final VariantArray EMPTY_ARRAY =
-      (VariantArray) Variants.value(EMPTY_METADATA, EMPTY_ARRAY_BUFFER);
+      (VariantArray)Variants.value(EMPTY_METADATA, EMPTY_ARRAY_BUFFER);
   private static final VariantArray TEST_ARRAY =
-      (VariantArray) Variants.value(EMPTY_METADATA, TEST_ARRAY_BUFFER);
+      (VariantArray)Variants.value(EMPTY_METADATA, TEST_ARRAY_BUFFER);
   private static final VariantArray MIXED_TYPE_ARRAY =
-      (VariantArray) Variants.value(EMPTY_METADATA, MIXED_TYPE_ARRAY_BUFFER);
+      (VariantArray)Variants.value(EMPTY_METADATA, MIXED_TYPE_ARRAY_BUFFER);
   private static final VariantArray NESTED_ARRAY =
-      (VariantArray) Variants.value(EMPTY_METADATA, NESTED_ARRAY_BUFFER);
+      (VariantArray)Variants.value(EMPTY_METADATA, NESTED_ARRAY_BUFFER);
   private static final VariantArray MIXED_NESTED_ARRAY =
-      (VariantArray) Variants.value(EMPTY_METADATA, MIXED_NESTED_ARRAY_BUFFER);
+      (VariantArray)Variants.value(EMPTY_METADATA, MIXED_NESTED_ARRAY_BUFFER);
   private static final VariantArray OBJECT_IN_ARRAY =
-      (VariantArray) Variants.value(TEST_METADATA, OBJECT_IN_ARRAY_BUFFER);
+      (VariantArray)Variants.value(TEST_METADATA, OBJECT_IN_ARRAY_BUFFER);
   private static final VariantArray MIXED_OBJECT_IN_ARRAY =
-      (VariantArray) Variants.value(TEST_METADATA, MIXED_OBJECT_IN_ARRAY_BUFFER);
+      (VariantArray)Variants.value(TEST_METADATA, MIXED_OBJECT_IN_ARRAY_BUFFER);
 
-  private static final Variant[] VARIANTS =
-      new Variant[] {
-        Variant.of(EMPTY_METADATA, Variants.ofNull()),
-        Variant.of(EMPTY_METADATA, Variants.of(true)),
-        Variant.of(EMPTY_METADATA, Variants.of(false)),
-        Variant.of(EMPTY_METADATA, Variants.of((byte) 34)),
-        Variant.of(EMPTY_METADATA, Variants.of((byte) -34)),
-        Variant.of(EMPTY_METADATA, Variants.of((short) 1234)),
-        Variant.of(EMPTY_METADATA, Variants.of((short) -1234)),
-        Variant.of(EMPTY_METADATA, Variants.of(12345)),
-        Variant.of(EMPTY_METADATA, Variants.of(-12345)),
-        Variant.of(EMPTY_METADATA, Variants.of(9876543210L)),
-        Variant.of(EMPTY_METADATA, Variants.of(-9876543210L)),
-        Variant.of(EMPTY_METADATA, Variants.of(10.11F)),
-        Variant.of(EMPTY_METADATA, Variants.of(-10.11F)),
-        Variant.of(EMPTY_METADATA, Variants.of(14.3D)),
-        Variant.of(EMPTY_METADATA, Variants.of(-14.3D)),
-        Variant.of(EMPTY_METADATA, EMPTY_OBJECT),
-        Variant.of(TEST_METADATA, TEST_OBJECT),
-        Variant.of(TEST_METADATA, SIMILAR_OBJECT),
-        Variant.of(TEST_METADATA, ARRAY_IN_OBJECT),
-        Variant.of(EMPTY_METADATA, EMPTY_ARRAY),
-        Variant.of(EMPTY_METADATA, TEST_ARRAY),
-        Variant.of(EMPTY_METADATA, MIXED_TYPE_ARRAY),
-        Variant.of(EMPTY_METADATA, NESTED_ARRAY),
-        Variant.of(EMPTY_METADATA, MIXED_NESTED_ARRAY),
-        Variant.of(TEST_METADATA, OBJECT_IN_ARRAY),
-        Variant.of(TEST_METADATA, MIXED_OBJECT_IN_ARRAY),
-        Variant.of(EMPTY_METADATA, Variants.ofIsoDate("2024-11-07")),
-        Variant.of(EMPTY_METADATA, Variants.ofIsoDate("1957-11-07")),
-        Variant.of(EMPTY_METADATA, Variants.ofIsoTimestamptz("2024-11-07T12:33:54.123456+00:00")),
-        Variant.of(EMPTY_METADATA, Variants.ofIsoTimestamptz("1957-11-07T12:33:54.123456+00:00")),
-        Variant.of(EMPTY_METADATA, Variants.ofIsoTimestampntz("2024-11-07T12:33:54.123456")),
-        Variant.of(EMPTY_METADATA, Variants.ofIsoTimestampntz("1957-11-07T12:33:54.123456")),
-        Variant.of(EMPTY_METADATA, Variants.of(new BigDecimal("123456.789"))), // decimal4
-        Variant.of(EMPTY_METADATA, Variants.of(new BigDecimal("-123456.789"))), // decimal4
-        Variant.of(EMPTY_METADATA, Variants.of(new BigDecimal("123456789.987654321"))), // decimal8
-        Variant.of(EMPTY_METADATA, Variants.of(new BigDecimal("-123456789.987654321"))), // decimal8
-        Variant.of(
-            EMPTY_METADATA, Variants.of(new BigDecimal("9876543210.123456789"))), // decimal16
-        Variant.of(
-            EMPTY_METADATA, Variants.of(new BigDecimal("-9876543210.123456789"))), // decimal16
-        Variant.of(
-            EMPTY_METADATA, Variants.of(ByteBuffer.wrap(new byte[] {0x0a, 0x0b, 0x0c, 0x0d}))),
-        Variant.of(EMPTY_METADATA, Variants.of("iceberg")),
-        Variant.of(EMPTY_METADATA, Variants.ofIsoTime("12:33:54.123456")),
-        Variant.of(
-            EMPTY_METADATA, Variants.ofIsoTimestamptzNanos("2024-11-07T12:33:54.123456789+00:00")),
-        Variant.of(
-            EMPTY_METADATA, Variants.ofIsoTimestamptzNanos("1957-11-07T12:33:54.123456789+00:00")),
-        Variant.of(
-            EMPTY_METADATA, Variants.ofIsoTimestampntzNanos("2024-11-07T12:33:54.123456789")),
-        Variant.of(
-            EMPTY_METADATA, Variants.ofIsoTimestampntzNanos("1957-11-07T12:33:54.123456789")),
-        Variant.of(EMPTY_METADATA, Variants.ofUUID("f24f9b64-81fa-49d1-b74e-8c09a6e31c56")),
-      };
+  private static final Variant[] VARIANTS = new Variant[] {
+      Variant.of(EMPTY_METADATA, Variants.ofNull()),
+      Variant.of(EMPTY_METADATA, Variants.of(true)),
+      Variant.of(EMPTY_METADATA, Variants.of(false)),
+      Variant.of(EMPTY_METADATA, Variants.of((byte)34)),
+      Variant.of(EMPTY_METADATA, Variants.of((byte)-34)),
+      Variant.of(EMPTY_METADATA, Variants.of((short)1234)),
+      Variant.of(EMPTY_METADATA, Variants.of((short)-1234)),
+      Variant.of(EMPTY_METADATA, Variants.of(12345)),
+      Variant.of(EMPTY_METADATA, Variants.of(-12345)),
+      Variant.of(EMPTY_METADATA, Variants.of(9876543210L)),
+      Variant.of(EMPTY_METADATA, Variants.of(-9876543210L)),
+      Variant.of(EMPTY_METADATA, Variants.of(10.11F)),
+      Variant.of(EMPTY_METADATA, Variants.of(-10.11F)),
+      Variant.of(EMPTY_METADATA, Variants.of(14.3D)),
+      Variant.of(EMPTY_METADATA, Variants.of(-14.3D)),
+      Variant.of(EMPTY_METADATA, EMPTY_OBJECT),
+      Variant.of(TEST_METADATA, TEST_OBJECT),
+      Variant.of(TEST_METADATA, SIMILAR_OBJECT),
+      Variant.of(TEST_METADATA, ARRAY_IN_OBJECT),
+      Variant.of(EMPTY_METADATA, EMPTY_ARRAY),
+      Variant.of(EMPTY_METADATA, TEST_ARRAY),
+      Variant.of(EMPTY_METADATA, MIXED_TYPE_ARRAY),
+      Variant.of(EMPTY_METADATA, NESTED_ARRAY),
+      Variant.of(EMPTY_METADATA, MIXED_NESTED_ARRAY),
+      Variant.of(TEST_METADATA, OBJECT_IN_ARRAY),
+      Variant.of(TEST_METADATA, MIXED_OBJECT_IN_ARRAY),
+      Variant.of(EMPTY_METADATA, Variants.ofIsoDate("2024-11-07")),
+      Variant.of(EMPTY_METADATA, Variants.ofIsoDate("1957-11-07")),
+      Variant.of(EMPTY_METADATA,
+                 Variants.ofIsoTimestamptz("2024-11-07T12:33:54.123456+00:00")),
+      Variant.of(EMPTY_METADATA,
+                 Variants.ofIsoTimestamptz("1957-11-07T12:33:54.123456+00:00")),
+      Variant.of(EMPTY_METADATA,
+                 Variants.ofIsoTimestampntz("2024-11-07T12:33:54.123456")),
+      Variant.of(EMPTY_METADATA,
+                 Variants.ofIsoTimestampntz("1957-11-07T12:33:54.123456")),
+      Variant.of(EMPTY_METADATA,
+                 Variants.of(new BigDecimal("123456.789"))), // decimal4
+      Variant.of(EMPTY_METADATA,
+                 Variants.of(new BigDecimal("-123456.789"))), // decimal4
+      Variant.of(EMPTY_METADATA, Variants.of(new BigDecimal(
+                                     "123456789.987654321"))), // decimal8
+      Variant.of(EMPTY_METADATA, Variants.of(new BigDecimal(
+                                     "-123456789.987654321"))), // decimal8
+      Variant.of(EMPTY_METADATA, Variants.of(new BigDecimal(
+                                     "9876543210.123456789"))), // decimal16
+      Variant.of(EMPTY_METADATA, Variants.of(new BigDecimal(
+                                     "-9876543210.123456789"))), // decimal16
+      Variant.of(EMPTY_METADATA, Variants.of(ByteBuffer.wrap(
+                                     new byte[] {0x0a, 0x0b, 0x0c, 0x0d}))),
+      Variant.of(EMPTY_METADATA, Variants.of("iceberg")),
+      Variant.of(EMPTY_METADATA, Variants.ofIsoTime("12:33:54.123456")),
+      Variant.of(EMPTY_METADATA, Variants.ofIsoTimestamptzNanos(
+                                     "2024-11-07T12:33:54.123456789+00:00")),
+      Variant.of(EMPTY_METADATA, Variants.ofIsoTimestamptzNanos(
+                                     "1957-11-07T12:33:54.123456789+00:00")),
+      Variant.of(EMPTY_METADATA, Variants.ofIsoTimestampntzNanos(
+                                     "2024-11-07T12:33:54.123456789")),
+      Variant.of(EMPTY_METADATA, Variants.ofIsoTimestampntzNanos(
+                                     "1957-11-07T12:33:54.123456789")),
+      Variant.of(EMPTY_METADATA,
+                 Variants.ofUUID("f24f9b64-81fa-49d1-b74e-8c09a6e31c56")),
+  };
 
   @ParameterizedTest
   @FieldSource("VARIANTS")
@@ -205,7 +216,9 @@ public class TestVariantWriters {
     Record record = RECORD.copy("id", 1, "var", variant);
 
     Record actual =
-        writeAndRead((id, name) -> ParquetVariantUtil.toParquetSchema(variant.value()), record);
+        writeAndRead((id, name)
+                         -> ParquetVariantUtil.toParquetSchema(variant.value()),
+                     record);
 
     InternalTestHelpers.assertEquals(SCHEMA.asStruct(), record, actual);
   }
@@ -219,40 +232,59 @@ public class TestVariantWriters {
             .collect(Collectors.toList());
 
     List<Record> actual =
-        writeAndRead((id, name) -> ParquetVariantUtil.toParquetSchema(variant.value()), expected);
+        writeAndRead((id, name)
+                         -> ParquetVariantUtil.toParquetSchema(variant.value()),
+                     expected);
 
     assertThat(actual.size()).isEqualTo(expected.size());
 
     for (int i = 0; i < expected.size(); i += 1) {
-      InternalTestHelpers.assertEquals(SCHEMA.asStruct(), expected.get(i), actual.get(i));
+      InternalTestHelpers.assertEquals(SCHEMA.asStruct(), expected.get(i),
+                                       actual.get(i));
     }
   }
 
-  private static Record writeAndRead(VariantShreddingFunction shreddingFunc, Record record)
-      throws IOException {
-    return Iterables.getOnlyElement(writeAndRead(shreddingFunc, List.of(record)));
+  private static Record writeAndRead(VariantShreddingFunction shreddingFunc,
+                                     Record record) throws IOException {
+    return Iterables.getOnlyElement(
+        writeAndRead(shreddingFunc, List.of(record)));
   }
 
-  private static List<Record> writeAndRead(
-      VariantShreddingFunction shreddingFunc, List<Record> records) throws IOException {
-    OutputFile outputFile = new InMemoryOutputFile();
+  private static List<Record>
+  writeAndRead(VariantShreddingFunction shreddingFunc, List<Record> records)
+      throws IOException {
+
+    // Prepare debug output path
+    String fileName = "variant-debug-" + UUID.randomUUID() + ".parquet";
+    Path outputPath = Paths.get("target/variant-debug-output", fileName);
+    Files.createDirectories(outputPath.getParent());
+
+    System.out.println("🔧 Writing Parquet file to: " +
+                       outputPath.toAbsolutePath());
+
+    // Write to a real Parquet file on disk
+    OutputFile outputFile =
+        org.apache.iceberg.Files.localOutput(outputPath.toString());
 
     try (FileAppender<Record> writer =
-        Parquet.write(outputFile)
-            .schema(SCHEMA)
-            .variantShreddingFunc(shreddingFunc)
-            .createWriterFunc(fileSchema -> InternalWriter.create(SCHEMA.asStruct(), fileSchema))
-            .build()) {
+             Parquet.write(outputFile)
+                 .schema(SCHEMA)
+                 .variantShreddingFunc(shreddingFunc)
+                 .createWriterFunc(
+                     fileSchema
+                     -> InternalWriter.create(SCHEMA.asStruct(), fileSchema))
+                 .build()) {
       for (Record record : records) {
         writer.add(record);
       }
     }
 
     try (CloseableIterable<Record> reader =
-        Parquet.read(outputFile.toInputFile())
-            .project(SCHEMA)
-            .createReaderFunc(fileSchema -> InternalReader.create(SCHEMA, fileSchema))
-            .build()) {
+             Parquet.read(outputFile.toInputFile())
+                 .project(SCHEMA)
+                 .createReaderFunc(
+                     fileSchema -> InternalReader.create(SCHEMA, fileSchema))
+                 .build()) {
       return Lists.newArrayList(reader);
     }
   }
