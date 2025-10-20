@@ -18,13 +18,16 @@
  */
 package org.apache.iceberg.spark.procedures;
 
+import java.util.Iterator;
 import org.apache.iceberg.actions.RewriteTablePath;
 import org.apache.iceberg.spark.actions.RewriteTablePathSparkAction;
 import org.apache.iceberg.spark.actions.SparkActions;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
-import org.apache.spark.sql.connector.iceberg.catalog.ProcedureParameter;
+import org.apache.spark.sql.connector.catalog.procedures.BoundProcedure;
+import org.apache.spark.sql.connector.catalog.procedures.ProcedureParameter;
+import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
@@ -33,18 +36,22 @@ import org.apache.spark.unsafe.types.UTF8String;
 
 public class RewriteTablePathProcedure extends BaseProcedure {
 
+  static final String NAME = "rewrite_table_path";
+
   private static final ProcedureParameter TABLE_PARAM =
-      ProcedureParameter.required("table", DataTypes.StringType);
+      requiredInParameter("table", DataTypes.StringType);
   private static final ProcedureParameter SOURCE_PREFIX_PARAM =
-      ProcedureParameter.required("source_prefix", DataTypes.StringType);
+      requiredInParameter("source_prefix", DataTypes.StringType);
   private static final ProcedureParameter TARGET_PREFIX_PARAM =
-      ProcedureParameter.required("target_prefix", DataTypes.StringType);
+      requiredInParameter("target_prefix", DataTypes.StringType);
   private static final ProcedureParameter START_VERSION_PARAM =
-      ProcedureParameter.optional("start_version", DataTypes.StringType);
+      optionalInParameter("start_version", DataTypes.StringType);
   private static final ProcedureParameter END_VERSION_PARM =
-      ProcedureParameter.optional("end_version", DataTypes.StringType);
+      optionalInParameter("end_version", DataTypes.StringType);
   private static final ProcedureParameter STAGING_LOCATION_PARAM =
-      ProcedureParameter.optional("staging_location", DataTypes.StringType);
+      optionalInParameter("staging_location", DataTypes.StringType);
+  private static final ProcedureParameter CREATE_FILE_LIST_PARAM =
+      optionalInParameter("create_file_list", DataTypes.BooleanType);
 
   private static final ProcedureParameter[] PARAMETERS =
       new ProcedureParameter[] {
@@ -53,14 +60,22 @@ public class RewriteTablePathProcedure extends BaseProcedure {
         TARGET_PREFIX_PARAM,
         START_VERSION_PARAM,
         END_VERSION_PARM,
-        STAGING_LOCATION_PARAM
+        STAGING_LOCATION_PARAM,
+        CREATE_FILE_LIST_PARAM
       };
 
   private static final StructType OUTPUT_TYPE =
       new StructType(
           new StructField[] {
             new StructField("latest_version", DataTypes.StringType, true, Metadata.empty()),
-            new StructField("file_list_location", DataTypes.StringType, true, Metadata.empty())
+            new StructField("file_list_location", DataTypes.StringType, true, Metadata.empty()),
+            new StructField(
+                "rewritten_manifest_file_paths_count",
+                DataTypes.IntegerType,
+                true,
+                Metadata.empty()),
+            new StructField(
+                "rewritten_delete_file_paths_count", DataTypes.IntegerType, true, Metadata.empty())
           });
 
   public static SparkProcedures.ProcedureBuilder builder() {
@@ -77,17 +92,17 @@ public class RewriteTablePathProcedure extends BaseProcedure {
   }
 
   @Override
+  public BoundProcedure bind(StructType inputType) {
+    return this;
+  }
+
+  @Override
   public ProcedureParameter[] parameters() {
     return PARAMETERS;
   }
 
   @Override
-  public StructType outputType() {
-    return OUTPUT_TYPE;
-  }
-
-  @Override
-  public InternalRow[] call(InternalRow args) {
+  public Iterator<Scan> call(InternalRow args) {
     ProcedureInput input = new ProcedureInput(spark(), tableCatalog(), PARAMETERS, args);
     Identifier tableIdent = input.ident(TABLE_PARAM);
     String sourcePrefix = input.asString(SOURCE_PREFIX_PARAM);
@@ -95,6 +110,7 @@ public class RewriteTablePathProcedure extends BaseProcedure {
     String startVersion = input.asString(START_VERSION_PARAM, null);
     String endVersion = input.asString(END_VERSION_PARM, null);
     String stagingLocation = input.asString(STAGING_LOCATION_PARAM, null);
+    boolean createFileList = input.asBoolean(CREATE_FILE_LIST_PARAM, true);
 
     return withIcebergTable(
         tableIdent,
@@ -111,7 +127,11 @@ public class RewriteTablePathProcedure extends BaseProcedure {
             action.stagingLocation(stagingLocation);
           }
 
-          return toOutputRows(action.rewriteLocationPrefix(sourcePrefix, targetPrefix).execute());
+          action.createFileList(createFileList);
+
+          return asScanIterator(
+              OUTPUT_TYPE,
+              toOutputRows(action.rewriteLocationPrefix(sourcePrefix, targetPrefix).execute()));
         });
   }
 
@@ -119,8 +139,15 @@ public class RewriteTablePathProcedure extends BaseProcedure {
     return new InternalRow[] {
       newInternalRow(
           UTF8String.fromString(result.latestVersion()),
-          UTF8String.fromString(result.fileListLocation()))
+          UTF8String.fromString(result.fileListLocation()),
+          result.rewrittenManifestFilePathsCount(),
+          result.rewrittenDeleteFilePathsCount())
     };
+  }
+
+  @Override
+  public String name() {
+    return NAME;
   }
 
   @Override

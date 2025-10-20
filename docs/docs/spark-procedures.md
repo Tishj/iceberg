@@ -271,6 +271,7 @@ the `expire_snapshots` procedure will never remove files which are still require
 | `max_concurrent_deletes` |    | int       | Size of the thread pool used for delete file actions (by default, no thread pool is used) |
 | `stream_results` |    | boolean       | When true, deletion files will be sent to Spark driver by RDD partition (by default, all the files will be sent to Spark driver). This option is recommended to set to `true` to prevent Spark driver OOM from large file size |
 | `snapshot_ids` |   | array of long       | Array of snapshot IDs to expire. |
+| `clean_expired_metadata` |   | boolean       | When true, cleans up metadata such as partition specs and schemas that are no longer referenced by snapshots. |
 
 If `older_than` and `retain_last` are omitted, the table's [expiration properties](configuration.md#table-behavior-properties) will be used.
 Snapshots that are still referenced by branches or tags won't be removed. By default, branches and tags never expire, but their retention policy can be changed with the table property `history.expire.max-ref-age-ms`. The `main` branch never expires.
@@ -413,6 +414,7 @@ Iceberg can compact data files in parallel using Spark with the `rewriteDataFile
 | `delete-ratio-threshold` | 0.3 | Minimum deletion ratio that needs to be associated with a data file for it to be considered for rewriting |
 | `output-spec-id` | current partition spec id | Identifier of the output partition spec. Data will be reorganized during the rewrite to align with the output partitioning. |
 | `remove-dangling-deletes` | false | Remove dangling position and equality deletes after rewriting. A delete file is considered dangling if it does not apply to any live data files. Enabling this will generate an additional commit for the removal. |
+| `max-files-to-rewrite` | null | This option sets an upper limit on the number of eligible files that will be rewritten. If this option is not specified, all eligible files will be rewritten. |
 
 !!! info
     Dangling delete files are removed based solely on data sequence numbers. This action does not apply to global 
@@ -441,6 +443,7 @@ Iceberg can compact data files in parallel using Spark with the `rewriteDataFile
 | `added_data_files_count`     | int | Number of new data files which were written by this command |
 | `rewritten_bytes_count`      | long | Number of bytes which were written by this command |
 | `failed_data_files_count`    | int | Number of data files that failed to be rewritten when `partial-progress.enabled` is true |
+| `removed_delete_files_count` | int | Number of delete files removed by this command |
 
 #### Examples
 
@@ -487,7 +490,7 @@ Data files in manifests are sorted by fields in the partition spec. This procedu
 | Argument Name | Required? | Type | Description                                                   |
 |---------------|-----------|------|---------------------------------------------------------------|
 | `table`       | ✔️  | string | Name of the table to update                                   |
-| `use_caching` | ️   | boolean | Use Spark caching during operation (defaults to true)         |
+| `use_caching` | ️   | boolean | Use Spark caching during operation (defaults to false). Enabling caching can increase memory footprint on executors. |
 | `spec_id`     | ️   | int | Spec id of the manifests to rewrite (defaults to current spec id) |
 
 #### Output
@@ -504,9 +507,9 @@ Rewrite the manifests in table `db.sample` and align manifest files with table p
 CALL catalog_name.system.rewrite_manifests('db.sample');
 ```
 
-Rewrite the manifests in table `db.sample` and disable the use of Spark caching. This could be done to avoid memory issues on executors.
+Rewrite the manifests on the partition spec `1` in table `db.sample`.
 ```sql
-CALL catalog_name.system.rewrite_manifests('db.sample', false);
+CALL catalog_name.system.rewrite_manifests(table => 'db.sample', spec_id => 1);
 ```
 
 ### `rewrite_position_delete_files`
@@ -522,6 +525,7 @@ Iceberg can rewrite position delete files, which serves two purposes:
 |---------------|-----------|------|----------------------------------|
 | `table`       | ✔️  | string | Name of the table to update      |
 | `options`     | ️   | map<string, string> | Options to be used for procedure |
+| `where`       | ️   | string | predicate as a string used for filtering the files. |
 
 Dangling deletes are always filtered out during rewriting.
 
@@ -974,6 +978,38 @@ Collect statistics of the snapshot with id `snap1` of table `my_table` for colum
 CALL catalog_name.system.compute_table_stats(table => 'my_table', snapshot_id => 'snap1', columns => array('col1', 'col2'));
 ```
 
+## Partition Statistics
+
+### `compute_partition_stats`
+
+This procedure computes the [partition stats](../../spec.md#partition-statistics) incrementally from the last snapshot that has a `PartitionStatisticsFile` 
+until the given snapshot (uses current snapshot if not specified) and writes the combined result into a `PartitionStatisticsFile`. 
+It performs a full compute if the previous partition statistics file does not exist. It also registers the 
+`PartitionStatisticsFile` to the table metadata.
+
+| Argument Name | Required? | Type          | Description                                                                    |
+|---------------|-----------|---------------|--------------------------------------------------------------------------------|
+| `table`       | ✔️        | string        | Name of the table                                                              |
+| `snapshot_id` |           | string        | Id of the snapshot to compute partition stats. Defaults to current snapshot id |
+
+#### Output
+
+| Output Name       | Type   | Description                                              |
+|-------------------|--------|----------------------------------------------------------|
+| `partition_statistics_file` | string | Path to the partition stats file created from by command |
+
+#### Examples
+
+Collect partition statistics of the latest snapshot of table `my_table`
+```sql
+CALL catalog_name.system.compute_partition_stats('my_table');
+```
+
+Collect partition statistics of the snapshot with id `snap1` of table `my_table`
+```sql
+CALL catalog_name.system.compute_partition_stats(table => 'my_table', snapshot_id => 'snap1');
+```
+
 ## Table Replication
 
 The `rewrite_table_path` procedure prepares an Iceberg table for copying to another location.
@@ -995,7 +1031,7 @@ This can be the starting point to fully or incrementally copy an Iceberg table t
 | `start_version`    |           | first metadata.json in table's metadata log    | string | The name or path of the chronologically first metadata.json to rewrite |
 | `end_version`      |           | latest metadata.json in table's metadata log   | string | The name or path of the chronologically last metadata.json to rewrite  |
 | `staging_location` |           | new directory under table's metadata directory | string | The output location for newly rewritten metadata files                 |
-
+| `create_file_list` |           | true                                           | boolean | Whether to generate a file list containing the paths of rewritten metadata |
 
 #### Modes of operation
 
@@ -1010,6 +1046,8 @@ This can be the starting point to fully or incrementally copy an Iceberg table t
 |----------------------|--------|-------------------------------------------------------------------|
 | `latest_version`     | string | Name of the latest metadata file rewritten by this procedure      |
 | `file_list_location` | string | Path to a CSV file containing a mapping of source to target paths |
+| `rewritten_manifest_file_paths_count` | int    | Number of manifest files with rewritten paths   |
+| `rewritten_delete_file_paths_count`   | int    | Number of delete files with rewritten paths     |
 
 ##### File List
 The file contains the copy plan for all files added to the table between `start_version` and `end_version`.

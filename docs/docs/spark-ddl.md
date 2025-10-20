@@ -619,6 +619,18 @@ Display view properties:
 SHOW TBLPROPERTIES <viewName>
 ```
 
+#### Creating a view with location
+
+To specify the view metadata location, use `TBLPROPERTIES ('location'='fully-qualified-uri')`:
+
+```sql
+CREATE VIEW <viewName>
+    TBLPROPERTIES ('location' = '/path/to/custom-location')
+AS SELECT * FROM <tableName>
+```
+
+The view metadata is stored in the specified location with `/metadata` appended, such as `/path/to/custom-location/metadata`.
+
 #### Dropping a view
 
 Drop an existing view:
@@ -635,7 +647,7 @@ DROP VIEW IF EXISTS <viewName>
 
 Update a view's schema, its properties, or the underlying SQL statement using `CREATE OR REPLACE`:
 ```sql
-CREATE OR REPLACE <viewName> (updated_id COMMENT 'updated ID')
+CREATE OR REPLACE VIEW <viewName> (updated_id COMMENT 'updated ID')
     TBLPROPERTIES ('key1' = 'new_val1')
     AS SELECT id FROM <tableName>
 ```

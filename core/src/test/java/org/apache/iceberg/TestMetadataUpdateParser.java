@@ -35,6 +35,7 @@ import java.util.Set;
 import java.util.stream.IntStream;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.encryption.BaseEncryptedKey;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
@@ -1370,8 +1371,7 @@ public class TestMetadataUpdateParser {
 
   private String createManifestListWithManifestFiles(long snapshotId, Long parentSnapshotId)
       throws IOException {
-    File manifestList = File.createTempFile("manifests", null, temp.toFile());
-    manifestList.deleteOnExit();
+    File manifestList = temp.resolve("manifests" + System.nanoTime()).toFile();
 
     List<ManifestFile> manifests =
         ImmutableList.of(
@@ -1380,7 +1380,13 @@ public class TestMetadataUpdateParser {
 
     try (ManifestListWriter writer =
         ManifestLists.write(
-            1, Files.localOutput(manifestList), snapshotId, parentSnapshotId, 0, 0L)) {
+            1,
+            Files.localOutput(manifestList),
+            PlaintextEncryptionManager.instance(),
+            snapshotId,
+            parentSnapshotId,
+            0,
+            0L)) {
       writer.addAll(manifests);
     }
 

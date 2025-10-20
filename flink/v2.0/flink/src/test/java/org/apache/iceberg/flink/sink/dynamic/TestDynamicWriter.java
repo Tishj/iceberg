@@ -18,23 +18,30 @@
  */
 package org.apache.iceberg.flink.sink.dynamic;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
 
 import java.io.File;
 import java.net.URI;
 import java.util.Collection;
 import java.util.Map;
+import javax.annotation.Nonnull;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
+import org.apache.flink.table.data.RowData;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.common.DynFields;
+import org.apache.iceberg.data.BaseFileWriterFactory;
 import org.apache.iceberg.flink.SimpleDataUtil;
 import org.apache.iceberg.flink.sink.TestFlinkIcebergSinkBase;
+import org.apache.iceberg.io.BaseTaskWriter;
+import org.apache.iceberg.io.FileWriterFactory;
+import org.apache.iceberg.io.TaskWriter;
 import org.apache.iceberg.io.WriteResult;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
-import org.jetbrains.annotations.NotNull;
 import org.junit.jupiter.api.Test;
 
 class TestDynamicWriter extends TestFlinkIcebergSinkBase {
@@ -59,7 +66,7 @@ class TestDynamicWriter extends TestFlinkIcebergSinkBase {
     dynamicWriter.write(record2, null);
     Collection<DynamicWriteResult> writeResults = dynamicWriter.prepareCommit();
 
-    assertThat(writeResults.size()).isEqualTo(2);
+    assertThat(writeResults).hasSize(2);
     assertThat(getNumDataFiles(table1)).isEqualTo(1);
     assertThat(
             dynamicWriter
@@ -85,7 +92,7 @@ class TestDynamicWriter extends TestFlinkIcebergSinkBase {
     dynamicWriter.write(record2, null);
     writeResults = dynamicWriter.prepareCommit();
 
-    assertThat(writeResults.size()).isEqualTo(2);
+    assertThat(writeResults).hasSize(2);
     assertThat(getNumDataFiles(table1)).isEqualTo(2);
     assertThat(
             dynamicWriter
@@ -106,6 +113,51 @@ class TestDynamicWriter extends TestFlinkIcebergSinkBase {
     assertThat(wr2.dataFiles().length).isEqualTo(1);
     assertThat(wr2.dataFiles()[0].format()).isEqualTo(FileFormat.PARQUET);
     assertThat(wr2.deleteFiles()).isEmpty();
+
+    dynamicWriter.close();
+  }
+
+  @Test
+  void testDynamicWriterPropertiesDefault() throws Exception {
+    Catalog catalog = CATALOG_EXTENSION.catalog();
+    Table table1 =
+        catalog.createTable(
+            TABLE1,
+            SimpleDataUtil.SCHEMA,
+            null,
+            ImmutableMap.of("write.parquet.compression-codec", "zstd"));
+
+    DynamicWriter dynamicWriter = createDynamicWriter(catalog);
+    DynamicRecordInternal record1 = getDynamicRecordInternal(table1);
+
+    assertThat(getNumDataFiles(table1)).isEqualTo(0);
+
+    dynamicWriter.write(record1, null);
+    Map<String, String> properties = properties(dynamicWriter);
+    assertThat(properties).containsEntry("write.parquet.compression-codec", "zstd");
+
+    dynamicWriter.close();
+  }
+
+  @Test
+  void testDynamicWriterPropertiesPriority() throws Exception {
+    Catalog catalog = CATALOG_EXTENSION.catalog();
+    Table table1 =
+        catalog.createTable(
+            TABLE1,
+            SimpleDataUtil.SCHEMA,
+            null,
+            ImmutableMap.of("write.parquet.compression-codec", "zstd"));
+
+    DynamicWriter dynamicWriter =
+        createDynamicWriter(catalog, ImmutableMap.of("write.parquet.compression-codec", "gzip"));
+    DynamicRecordInternal record1 = getDynamicRecordInternal(table1);
+
+    assertThat(getNumDataFiles(table1)).isEqualTo(0);
+
+    dynamicWriter.write(record1, null);
+    Map<String, String> properties = properties(dynamicWriter);
+    assertThat(properties).containsEntry("write.parquet.compression-codec", "gzip");
 
     dynamicWriter.close();
   }
@@ -150,13 +202,14 @@ class TestDynamicWriter extends TestFlinkIcebergSinkBase {
             "Equality field columns shouldn't be empty when configuring to use UPSERT data.");
   }
 
-  private static @NotNull DynamicWriter createDynamicWriter(Catalog catalog) {
+  private static @Nonnull DynamicWriter createDynamicWriter(
+      Catalog catalog, Map<String, String> properties) {
     DynamicWriter dynamicWriter =
         new DynamicWriter(
             catalog,
             FileFormat.PARQUET,
             1024L,
-            Map.of(),
+            properties,
             100,
             new DynamicWriterMetrics(new UnregisteredMetricsGroup()),
             0,
@@ -164,7 +217,11 @@ class TestDynamicWriter extends TestFlinkIcebergSinkBase {
     return dynamicWriter;
   }
 
-  private static @NotNull DynamicRecordInternal getDynamicRecordInternal(Table table1) {
+  private static @Nonnull DynamicWriter createDynamicWriter(Catalog catalog) {
+    return createDynamicWriter(catalog, Map.of());
+  }
+
+  private static @Nonnull DynamicRecordInternal getDynamicRecordInternal(Table table1) {
     DynamicRecordInternal record = new DynamicRecordInternal();
     record.setTableName(TableIdentifier.parse(table1.name()).name());
     record.setSchema(table1.schema());
@@ -179,5 +236,20 @@ class TestDynamicWriter extends TestFlinkIcebergSinkBase {
       return dataDir.listFiles((dir, name) -> !name.startsWith(".")).length;
     }
     return 0;
+  }
+
+  private Map<String, String> properties(DynamicWriter dynamicWriter) {
+    DynFields.BoundField<Map<WriteTarget, TaskWriter<RowData>>> writerField =
+        DynFields.builder().hiddenImpl(dynamicWriter.getClass(), "writers").build(dynamicWriter);
+
+    DynFields.BoundField<FileWriterFactory> writerFactoryField =
+        DynFields.builder()
+            .hiddenImpl(BaseTaskWriter.class, "writerFactory")
+            .build(writerField.get().values().iterator().next());
+    DynFields.BoundField<Map<String, String>> propsField =
+        DynFields.builder()
+            .hiddenImpl(BaseFileWriterFactory.class, "writerProperties")
+            .build(writerFactoryField.get());
+    return propsField.get();
   }
 }

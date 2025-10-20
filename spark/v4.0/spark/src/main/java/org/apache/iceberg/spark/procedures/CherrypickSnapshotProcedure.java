@@ -18,12 +18,15 @@
  */
 package org.apache.iceberg.spark.procedures;
 
+import java.util.Iterator;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.spark.procedures.SparkProcedures.ProcedureBuilder;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
-import org.apache.spark.sql.connector.iceberg.catalog.ProcedureParameter;
+import org.apache.spark.sql.connector.catalog.procedures.BoundProcedure;
+import org.apache.spark.sql.connector.catalog.procedures.ProcedureParameter;
+import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
@@ -40,11 +43,15 @@ import org.apache.spark.sql.types.StructType;
  */
 class CherrypickSnapshotProcedure extends BaseProcedure {
 
+  static final String NAME = "cherrypick_snapshot";
+
+  private static final ProcedureParameter TABLE_PARAM =
+      requiredInParameter("table", DataTypes.StringType);
+  private static final ProcedureParameter SNAPSHOT_ID_PARAM =
+      requiredInParameter("snapshot_id", DataTypes.LongType);
+
   private static final ProcedureParameter[] PARAMETERS =
-      new ProcedureParameter[] {
-        ProcedureParameter.required("table", DataTypes.StringType),
-        ProcedureParameter.required("snapshot_id", DataTypes.LongType)
-      };
+      new ProcedureParameter[] {TABLE_PARAM, SNAPSHOT_ID_PARAM};
 
   private static final StructType OUTPUT_TYPE =
       new StructType(
@@ -67,30 +74,39 @@ class CherrypickSnapshotProcedure extends BaseProcedure {
   }
 
   @Override
+  public BoundProcedure bind(StructType inputType) {
+    return this;
+  }
+
+  @Override
   public ProcedureParameter[] parameters() {
     return PARAMETERS;
   }
 
   @Override
-  public StructType outputType() {
-    return OUTPUT_TYPE;
+  public Iterator<Scan> call(InternalRow args) {
+    ProcedureInput input = new ProcedureInput(spark(), tableCatalog(), PARAMETERS, args);
+
+    Identifier tableIdent = input.ident(TABLE_PARAM);
+    long snapshotId = input.asLong(SNAPSHOT_ID_PARAM);
+
+    return asScanIterator(
+        OUTPUT_TYPE,
+        modifyIcebergTable(
+            tableIdent,
+            table -> {
+              table.manageSnapshots().cherrypick(snapshotId).commit();
+
+              Snapshot currentSnapshot = table.currentSnapshot();
+
+              InternalRow outputRow = newInternalRow(snapshotId, currentSnapshot.snapshotId());
+              return new InternalRow[] {outputRow};
+            }));
   }
 
   @Override
-  public InternalRow[] call(InternalRow args) {
-    Identifier tableIdent = toIdentifier(args.getString(0), PARAMETERS[0].name());
-    long snapshotId = args.getLong(1);
-
-    return modifyIcebergTable(
-        tableIdent,
-        table -> {
-          table.manageSnapshots().cherrypick(snapshotId).commit();
-
-          Snapshot currentSnapshot = table.currentSnapshot();
-
-          InternalRow outputRow = newInternalRow(snapshotId, currentSnapshot.snapshotId());
-          return new InternalRow[] {outputRow};
-        });
+  public String name() {
+    return NAME;
   }
 
   @Override

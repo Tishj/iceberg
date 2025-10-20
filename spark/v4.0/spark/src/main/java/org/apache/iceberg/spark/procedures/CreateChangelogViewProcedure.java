@@ -19,6 +19,7 @@
 package org.apache.iceberg.spark.procedures;
 
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -32,6 +33,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.spark.ChangelogIterator;
 import org.apache.iceberg.spark.source.SparkChangelogTable;
+import org.apache.iceberg.util.ArrayUtil;
 import org.apache.spark.api.java.function.MapPartitionsFunction;
 import org.apache.spark.sql.Column;
 import org.apache.spark.sql.Dataset;
@@ -41,7 +43,9 @@ import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.OrderUtils;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
-import org.apache.spark.sql.connector.iceberg.catalog.ProcedureParameter;
+import org.apache.spark.sql.connector.catalog.procedures.BoundProcedure;
+import org.apache.spark.sql.connector.catalog.procedures.ProcedureParameter;
+import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
@@ -85,18 +89,20 @@ import org.apache.spark.unsafe.types.UTF8String;
  */
 public class CreateChangelogViewProcedure extends BaseProcedure {
 
+  static final String NAME = "create_changelog_view";
+
   private static final ProcedureParameter TABLE_PARAM =
-      ProcedureParameter.required("table", DataTypes.StringType);
+      requiredInParameter("table", DataTypes.StringType);
   private static final ProcedureParameter CHANGELOG_VIEW_PARAM =
-      ProcedureParameter.optional("changelog_view", DataTypes.StringType);
+      optionalInParameter("changelog_view", DataTypes.StringType);
   private static final ProcedureParameter OPTIONS_PARAM =
-      ProcedureParameter.optional("options", STRING_MAP);
+      optionalInParameter("options", STRING_MAP);
   private static final ProcedureParameter COMPUTE_UPDATES_PARAM =
-      ProcedureParameter.optional("compute_updates", DataTypes.BooleanType);
+      optionalInParameter("compute_updates", DataTypes.BooleanType);
   private static final ProcedureParameter IDENTIFIER_COLUMNS_PARAM =
-      ProcedureParameter.optional("identifier_columns", STRING_ARRAY);
+      optionalInParameter("identifier_columns", STRING_ARRAY);
   private static final ProcedureParameter NET_CHANGES =
-      ProcedureParameter.optional("net_changes", DataTypes.BooleanType);
+      optionalInParameter("net_changes", DataTypes.BooleanType);
 
   private static final ProcedureParameter[] PARAMETERS =
       new ProcedureParameter[] {
@@ -128,17 +134,17 @@ public class CreateChangelogViewProcedure extends BaseProcedure {
   }
 
   @Override
+  public BoundProcedure bind(StructType inputType) {
+    return this;
+  }
+
+  @Override
   public ProcedureParameter[] parameters() {
     return PARAMETERS;
   }
 
   @Override
-  public StructType outputType() {
-    return OUTPUT_TYPE;
-  }
-
-  @Override
-  public InternalRow[] call(InternalRow args) {
+  public Iterator<Scan> call(InternalRow args) {
     ProcedureInput input = new ProcedureInput(spark(), tableCatalog(), PARAMETERS, args);
 
     Identifier tableIdent = input.ident(TABLE_PARAM);
@@ -171,7 +177,7 @@ public class CreateChangelogViewProcedure extends BaseProcedure {
 
     df.createOrReplaceTempView(viewName);
 
-    return toOutputRows(viewName);
+    return asScanIterator(OUTPUT_TYPE, toOutputRows(viewName));
   }
 
   private Dataset<Row> computeUpdateImages(String[] identifierColumns, Dataset<Row> df) {
@@ -179,16 +185,13 @@ public class CreateChangelogViewProcedure extends BaseProcedure {
         identifierColumns.length > 0,
         "Cannot compute the update images because identifier columns are not set");
 
-    Column[] repartitionSpec = new Column[identifierColumns.length + 1];
-    for (int i = 0; i < identifierColumns.length; i++) {
-      repartitionSpec[i] = df.col(CreateChangelogViewProcedure.delimitedName(identifierColumns[i]));
-    }
-
-    repartitionSpec[repartitionSpec.length - 1] = df.col(MetadataColumns.CHANGE_ORDINAL.name());
-
-    String[] identifierFields = Arrays.copyOf(identifierColumns, identifierColumns.length + 1);
-    identifierFields[identifierFields.length - 1] = MetadataColumns.CHANGE_ORDINAL.name();
-
+    String[] identifierFields =
+        ArrayUtil.add(identifierColumns, MetadataColumns.CHANGE_ORDINAL.name());
+    Column[] repartitionSpec =
+        Arrays.stream(identifierFields)
+            .map(CreateChangelogViewProcedure::delimitedName)
+            .map(df::col)
+            .toArray(Column[]::new);
     return applyChangelogIterator(df, repartitionSpec, identifierFields);
   }
 
@@ -287,7 +290,7 @@ public class CreateChangelogViewProcedure extends BaseProcedure {
    * @return A name that can be safely used within Spark to reference a column by its name.
    */
   private static String delimitedName(String columnName) {
-    var delimited = columnName.startsWith("`") && columnName.endsWith("`");
+    boolean delimited = columnName.startsWith("`") && columnName.endsWith("`");
     if (delimited) {
       return columnName;
     } else {
@@ -312,6 +315,11 @@ public class CreateChangelogViewProcedure extends BaseProcedure {
   private InternalRow[] toOutputRows(String viewName) {
     InternalRow row = newInternalRow(UTF8String.fromString(viewName));
     return new InternalRow[] {row};
+  }
+
+  @Override
+  public String name() {
+    return NAME;
   }
 
   @Override

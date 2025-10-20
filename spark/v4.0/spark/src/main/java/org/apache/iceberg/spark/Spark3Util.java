@@ -92,11 +92,15 @@ import org.apache.spark.sql.types.IntegerType;
 import org.apache.spark.sql.types.LongType;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.CaseInsensitiveStringMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import scala.Option;
 import scala.collection.JavaConverters;
 import scala.collection.immutable.Seq;
 
 public class Spark3Util {
+
+  private static final Logger LOG = LoggerFactory.getLogger(Spark3Util.class);
 
   private static final Set<String> RESERVED_PROPERTIES =
       ImmutableSet.of(TableCatalog.PROP_LOCATION, TableCatalog.PROP_PROVIDER);
@@ -234,6 +238,13 @@ public class Spark3Util {
         add.isNullable(),
         "Incompatible change: cannot add required column: %s",
         leafName(add.fieldNames()));
+    if (add.defaultValue() != null) {
+      throw new UnsupportedOperationException(
+          String.format(
+              "Cannot add column %s since setting default values in Spark is currently unsupported",
+              leafName(add.fieldNames())));
+    }
+
     Type type = SparkSchemaUtil.convert(add.dataType());
     pendingUpdate.addColumn(
         parentName(add.fieldNames()), leafName(add.fieldNames()), type, add.comment());
@@ -803,6 +814,7 @@ public class Spark3Util {
               try {
                 return catalogManager.catalog(catalogName);
               } catch (Exception e) {
+                LOG.warn("Failed to load catalog: {}", catalogName, e);
                 return null;
               }
             },

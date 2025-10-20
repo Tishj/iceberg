@@ -18,6 +18,7 @@
  */
 package org.apache.iceberg.spark.procedures;
 
+import java.util.Iterator;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.actions.RewriteManifests;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
@@ -27,7 +28,9 @@ import org.apache.iceberg.spark.procedures.SparkProcedures.ProcedureBuilder;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
-import org.apache.spark.sql.connector.iceberg.catalog.ProcedureParameter;
+import org.apache.spark.sql.connector.catalog.procedures.BoundProcedure;
+import org.apache.spark.sql.connector.catalog.procedures.ProcedureParameter;
+import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
@@ -43,12 +46,17 @@ import org.apache.spark.sql.types.StructType;
  */
 class RewriteManifestsProcedure extends BaseProcedure {
 
+  static final String NAME = "rewrite_manifests";
+
+  private static final ProcedureParameter TABLE_PARAM =
+      requiredInParameter("table", DataTypes.StringType);
+  private static final ProcedureParameter USE_CACHING_PARAM =
+      optionalInParameter("use_caching", DataTypes.BooleanType);
+  private static final ProcedureParameter SPEC_ID_PARAM =
+      optionalInParameter("spec_id", DataTypes.IntegerType);
+
   private static final ProcedureParameter[] PARAMETERS =
-      new ProcedureParameter[] {
-        ProcedureParameter.required("table", DataTypes.StringType),
-        ProcedureParameter.optional("use_caching", DataTypes.BooleanType),
-        ProcedureParameter.optional("spec_id", DataTypes.IntegerType)
-      };
+      new ProcedureParameter[] {TABLE_PARAM, USE_CACHING_PARAM, SPEC_ID_PARAM};
 
   // counts are not nullable since the action result is never null
   private static final StructType OUTPUT_TYPE =
@@ -73,20 +81,21 @@ class RewriteManifestsProcedure extends BaseProcedure {
   }
 
   @Override
+  public BoundProcedure bind(StructType inputType) {
+    return this;
+  }
+
+  @Override
   public ProcedureParameter[] parameters() {
     return PARAMETERS;
   }
 
   @Override
-  public StructType outputType() {
-    return OUTPUT_TYPE;
-  }
-
-  @Override
-  public InternalRow[] call(InternalRow args) {
-    Identifier tableIdent = toIdentifier(args.getString(0), PARAMETERS[0].name());
-    Boolean useCaching = args.isNullAt(1) ? null : args.getBoolean(1);
-    Integer specId = args.isNullAt(2) ? null : args.getInt(2);
+  public Iterator<Scan> call(InternalRow args) {
+    ProcedureInput input = new ProcedureInput(spark(), tableCatalog(), PARAMETERS, args);
+    Identifier tableIdent = input.ident(TABLE_PARAM);
+    Boolean useCaching = input.asBoolean(USE_CACHING_PARAM, null);
+    Integer specId = input.asInt(SPEC_ID_PARAM, null);
 
     return modifyIcebergTable(
         tableIdent,
@@ -103,7 +112,7 @@ class RewriteManifestsProcedure extends BaseProcedure {
 
           RewriteManifests.Result result = action.execute();
 
-          return toOutputRows(result);
+          return asScanIterator(OUTPUT_TYPE, toOutputRows(result));
         });
   }
 
@@ -112,6 +121,11 @@ class RewriteManifestsProcedure extends BaseProcedure {
     int addedManifestsCount = Iterables.size(result.addedManifests());
     InternalRow row = newInternalRow(rewrittenManifestsCount, addedManifestsCount);
     return new InternalRow[] {row};
+  }
+
+  @Override
+  public String name() {
+    return NAME;
   }
 
   @Override

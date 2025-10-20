@@ -31,15 +31,16 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.stream.Collectors;
+import javax.annotation.Nonnull;
 import org.apache.iceberg.aws.s3.MinioUtil;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.rest.auth.OAuth2Properties;
+import org.apache.iceberg.util.ThreadPools;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.handler.gzip.GzipHandler;
 import org.eclipse.jetty.servlet.ServletContextHandler;
 import org.eclipse.jetty.servlet.ServletHolder;
-import org.jetbrains.annotations.NotNull;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -73,6 +74,7 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
+import software.amazon.awssdk.utils.IoUtils;
 
 @Testcontainers
 public class TestS3RestSigner {
@@ -122,9 +124,9 @@ public class TestS3RestSigner {
     // there aren't other token refreshes being scheduled after every sign request and after
     // TestS3RestSigner completes all tests, there should be only this single token in the queue
     // that is scheduled for refresh
-    assertThat(validatingSigner.icebergSigner)
-        .extracting("authManager")
-        .extracting("refreshExecutor")
+    assertThat(ThreadPools.authRefreshPool())
+        // internal field in java.util.concurrent.Executors.DelegatedScheduledExecutorService
+        .extracting("e")
         .asInstanceOf(type(ScheduledThreadPoolExecutor.class))
         .satisfies(
             executor -> {
@@ -143,6 +145,11 @@ public class TestS3RestSigner {
     if (null != httpServer) {
       httpServer.stop();
     }
+
+    IoUtils.closeQuietlyV2(S3V4RestSignerClient.authManager, null);
+    IoUtils.closeQuietlyV2(S3V4RestSignerClient.httpClient, null);
+    S3V4RestSignerClient.authManager = null;
+    S3V4RestSignerClient.httpClient = null;
   }
 
   @BeforeEach
@@ -338,7 +345,7 @@ public class TestS3RestSigner {
       return awsResult;
     }
 
-    @NotNull
+    @Nonnull
     private SdkHttpFullRequest signWithAwsSigner(
         SdkHttpFullRequest request, AwsS3V4SignerParams signerParams) {
       // we need to filter out the unsigned headers for the AWS signer and re-append those headers

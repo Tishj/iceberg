@@ -18,22 +18,22 @@
  */
 package org.apache.iceberg.data;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import static org.apache.iceberg.data.FileHelpers.encrypt;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.UUID;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.DataFile;
-import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.Files;
 import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
-import org.apache.iceberg.io.FileAppender;
+import org.apache.iceberg.io.DataWriter;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 
 /** Helper for appending {@link DataFile} to a table or appending {@link Record}s to a table. */
@@ -94,15 +94,14 @@ public class GenericAppenderHelper {
 
   public DataFile writeFile(List<Record> records) throws IOException {
     Preconditions.checkNotNull(table, "table not set");
-    File file = File.createTempFile("junit", null, temp.toFile());
-    assertThat(file.delete()).isTrue();
+    File file = temp.resolve("generic-appender-test-" + UUID.randomUUID().toString()).toFile();
     return appendToLocalFile(table, file, fileFormat, null, records, conf);
   }
 
   public DataFile writeFile(StructLike partition, List<Record> records) throws IOException {
     Preconditions.checkNotNull(table, "table not set");
-    File file = File.createTempFile("junit", null, temp.toFile());
-    assertThat(file.delete()).isTrue();
+    File file =
+        temp.resolve("generic-appender-partition-test-" + UUID.randomUUID().toString()).toFile();
     return appendToLocalFile(table, file, fileFormat, partition, records, conf);
   }
 
@@ -114,30 +113,24 @@ public class GenericAppenderHelper {
       List<Record> records,
       Configuration conf)
       throws IOException {
-    GenericAppenderFactory appenderFactory = new GenericAppenderFactory(table.schema());
+    GenericFileWriterFactory.Builder builder =
+        new GenericFileWriterFactory.Builder(table).dataFileFormat(format);
 
     // Push down ORC related settings to appender if there are any
     if (FileFormat.ORC.equals(format) && conf != null) {
-      appenderFactory.setAll(conf.getValByRegex(ORC_CONFIG_PREFIX));
+      builder.writerProperties(conf.getValByRegex(ORC_CONFIG_PREFIX));
     }
 
     if (FileFormat.PARQUET.equals(format) && conf != null) {
-      appenderFactory.setAll(conf.getValByRegex(PARQUET_CONFIG_PATTERN));
+      builder.writerProperties(conf.getValByRegex(PARQUET_CONFIG_PATTERN));
     }
 
-    FileAppender<Record> appender = appenderFactory.newAppender(Files.localOutput(file), format);
-    try (FileAppender<Record> fileAppender = appender) {
-      fileAppender.addAll(records);
+    DataWriter<Record> writer =
+        builder.build().newDataWriter(encrypt(Files.localOutput(file)), table.spec(), partition);
+    try (writer) {
+      writer.write(records);
     }
 
-    return DataFiles.builder(table.spec())
-        .withRecordCount(records.size())
-        .withFileSizeInBytes(file.length())
-        .withPath(Files.localInput(file).location())
-        .withMetrics(appender.metrics())
-        .withFormat(format)
-        .withPartition(partition)
-        .withSplitOffsets(appender.splitOffsets())
-        .build();
+    return writer.toDataFile();
   }
 }

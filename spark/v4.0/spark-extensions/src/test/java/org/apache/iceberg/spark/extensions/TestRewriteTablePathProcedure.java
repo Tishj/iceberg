@@ -22,13 +22,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.atIndex;
 
+import java.io.File;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
+import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.ParameterizedTestExtension;
 import org.apache.iceberg.RewriteTablePathUtil;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableUtil;
+import org.apache.iceberg.data.FileHelpers;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.spark.SparkCatalogConfig;
+import org.apache.iceberg.util.Pair;
 import org.apache.spark.sql.AnalysisException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -119,14 +126,16 @@ public class TestRewriteTablePathProcedure extends ExtensionsTestBase {
     assertThatThrownBy(
             () -> sql("CALL %s.system.rewrite_table_path('%s')", catalogName, tableIdent))
         .isInstanceOf(AnalysisException.class)
-        .hasMessageContaining("Missing required parameters: [source_prefix,target_prefix]");
+        .hasMessageContaining(
+            "[REQUIRED_PARAMETER_NOT_FOUND] Cannot invoke routine `rewrite_table_path` because the parameter named `source_prefix` is required, but the routine call did not supply a value. Please update the routine call to supply an argument value (either positionally at index 0 or by name) and retry the query again. SQLSTATE: 4274K");
     assertThatThrownBy(
             () ->
                 sql(
                     "CALL %s.system.rewrite_table_path('%s','%s')",
                     catalogName, tableIdent, targetLocation))
         .isInstanceOf(AnalysisException.class)
-        .hasMessageContaining("Missing required parameters: [target_prefix]");
+        .hasMessageContaining(
+            "[REQUIRED_PARAMETER_NOT_FOUND] Cannot invoke routine `rewrite_table_path` because the parameter named `target_prefix` is required, but the routine call did not supply a value. Please update the routine call to supply an argument value (either positionally at index 0 or by name) and retry the query again. SQLSTATE: 4274K");
     assertThatThrownBy(
             () ->
                 sql(
@@ -169,8 +178,93 @@ public class TestRewriteTablePathProcedure extends ExtensionsTestBase {
             "Cannot find provided version file %s in metadata log.", "v11.metadata.json");
   }
 
+  @TestTemplate
+  public void testRewriteTablePathWithoutFileList() {
+    String location = targetTableDir.toFile().toURI().toString();
+    Table table = validationCatalog.loadTable(tableIdent);
+    String metadataJson = TableUtil.metadataFileLocation(table);
+
+    List<Object[]> result =
+        sql(
+            "CALL %s.system.rewrite_table_path(table => '%s', source_prefix => '%s', target_prefix => '%s', create_file_list => false)",
+            catalogName, tableIdent, table.location(), location);
+    assertThat(result).hasSize(1);
+    assertThat(result.get(0)[0])
+        .as("Should return correct latest version")
+        .isEqualTo(RewriteTablePathUtil.fileName(metadataJson));
+    assertThat(result.get(0)[1])
+        .as("Check if file list location is correctly marked as N/A when not generated")
+        .asString()
+        .isEqualTo("N/A");
+  }
+
   private void checkFileListLocationCount(String fileListLocation, long expectedFileCount) {
     long fileCount = spark.read().format("text").load(fileListLocation).count();
     assertThat(fileCount).isEqualTo(expectedFileCount);
+  }
+
+  @TestTemplate
+  public void testRewriteTablePathWithManifestAndDeleteCounts() throws IOException {
+    sql("INSERT INTO %s VALUES (1, 'a')", tableName);
+    sql("INSERT INTO %s VALUES (2, 'b')", tableName);
+    sql("INSERT INTO %s VALUES (3, 'c')", tableName);
+
+    Table table = validationCatalog.loadTable(tableIdent);
+    List<Pair<CharSequence, Long>> rowsToDelete =
+        Lists.newArrayList(
+            Pair.of(
+                table.currentSnapshot().addedDataFiles(table.io()).iterator().next().location(),
+                0L));
+
+    File file = new File(removePrefix(table.location()) + "/data/deletes.parquet");
+    String filePath = file.toURI().toString();
+    if (SparkCatalogConfig.REST.catalogName().equals(catalogName)) {
+      // We applied this special handling because the base path for
+      // matching the RESTCATALOG's Hive BaseLocation is represented
+      // in the form of an AbsolutePath.
+      filePath = file.getAbsolutePath().toString();
+    }
+
+    DeleteFile positionDeletes =
+        FileHelpers.writeDeleteFile(table, table.io().newOutputFile(filePath), rowsToDelete)
+            .first();
+
+    table.newRowDelta().addDeletes(positionDeletes).commit();
+
+    sql("INSERT INTO %s VALUES (4, 'd')", tableName);
+
+    String targetLocation = targetTableDir.toFile().toURI().toString();
+    String stagingLocation = staging.toFile().toURI().toString();
+
+    List<Object[]> result =
+        sql(
+            "CALL %s.system.rewrite_table_path("
+                + "table => '%s', "
+                + "source_prefix => '%s', "
+                + "target_prefix => '%s', "
+                + "staging_location => '%s', create_file_list => false)",
+            catalogName, tableIdent, table.location(), targetLocation, stagingLocation);
+
+    assertThat(result).hasSize(1);
+    Object[] row = result.get(0);
+
+    int rewrittenManifestFilesCount = ((Number) row[2]).intValue();
+    int rewrittenDeleteFilesCount = ((Number) row[3]).intValue();
+
+    assertThat(rewrittenDeleteFilesCount)
+        .as(
+            "Expected exactly 1 delete file to be rewritten, but found "
+                + rewrittenDeleteFilesCount)
+        .isEqualTo(1);
+
+    assertThat(rewrittenManifestFilesCount)
+        .as(
+            "Expected exactly 5 manifest files to be rewritten, but found "
+                + rewrittenManifestFilesCount)
+        .isEqualTo(5);
+  }
+
+  private String removePrefix(String path) {
+    return path.substring(path.lastIndexOf(":") + 1);
   }
 }

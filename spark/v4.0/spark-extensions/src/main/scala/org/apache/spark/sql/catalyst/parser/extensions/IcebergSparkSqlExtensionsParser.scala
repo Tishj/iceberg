@@ -28,7 +28,6 @@ import org.antlr.v4.runtime.tree.TerminalNodeImpl
 import org.apache.iceberg.common.DynConstructors
 import org.apache.iceberg.spark.ExtendedParser
 import org.apache.iceberg.spark.ExtendedParser.RawOrderField
-import org.apache.iceberg.spark.procedures.SparkProcedures
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.FunctionIdentifier
@@ -136,24 +135,17 @@ class IcebergSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserI
       .replaceAll("`", "")
       .trim()
 
-     isIcebergProcedure(normalized) || (
-        normalized.startsWith("alter table") && (
-            normalized.contains("add partition field") ||
-            normalized.contains("drop partition field") ||
-            normalized.contains("replace partition field") ||
-            normalized.contains("write ordered by") ||
-            normalized.contains("write locally ordered by") ||
-            normalized.contains("write distributed by") ||
-            normalized.contains("write unordered") ||
-            normalized.contains("set identifier fields") ||
-            normalized.contains("drop identifier fields") ||
-            isSnapshotRefDdl(normalized)))
-  }
-
-  // All builtin Iceberg procedures are under the 'system' namespace
-  private def isIcebergProcedure(normalized: String): Boolean = {
-    normalized.startsWith("call") &&
-    SparkProcedures.names().asScala.map("system." + _).exists(normalized.contains)
+      normalized.startsWith("alter table") && (
+          normalized.contains("add partition field") ||
+          normalized.contains("drop partition field") ||
+          normalized.contains("replace partition field") ||
+          normalized.contains("write ordered by") ||
+          normalized.contains("write locally ordered by") ||
+          normalized.contains("write distributed by") ||
+          normalized.contains("write unordered") ||
+          normalized.contains("set identifier fields") ||
+          normalized.contains("drop identifier fields") ||
+          isSnapshotRefDdl(normalized))
   }
 
   private def isSnapshotRefDdl(normalized: String): Boolean = {
@@ -323,8 +315,8 @@ class IcebergParseException(
     val builder = new StringBuilder
     builder ++= "\n" ++= message
     start match {
-      case Origin(Some(l), Some(p), Some(startIndex), Some(stopIndex), Some(sqlText), Some(objectType),
-        Some(objectName), _, _) =>
+      case Origin(Some(l), Some(p), Some(_), Some(_), Some(_), Some(_),
+        Some(_), _, _) =>
         builder ++= s"(line $l, pos $p)\n"
         command.foreach { cmd =>
           val (above, below) = cmd.split("\n").splitAt(l)

@@ -18,6 +18,7 @@
  */
 package org.apache.iceberg.spark.procedures;
 
+import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.apache.iceberg.Table;
@@ -25,16 +26,17 @@ import org.apache.iceberg.actions.DeleteOrphanFiles;
 import org.apache.iceberg.actions.DeleteOrphanFiles.PrefixMismatchMode;
 import org.apache.iceberg.io.SupportsBulkOperations;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
-import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.spark.actions.DeleteOrphanFilesSparkAction;
 import org.apache.iceberg.spark.actions.SparkActions;
 import org.apache.iceberg.spark.procedures.SparkProcedures.ProcedureBuilder;
-import org.apache.iceberg.util.DateTimeUtil;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
-import org.apache.spark.sql.connector.iceberg.catalog.ProcedureParameter;
+import org.apache.spark.sql.connector.catalog.procedures.BoundProcedure;
+import org.apache.spark.sql.connector.catalog.procedures.ProcedureParameter;
+import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
@@ -42,7 +44,6 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import scala.runtime.BoxedUnit;
 
 /**
  * A procedure that removes orphan files in a table.
@@ -50,21 +51,45 @@ import scala.runtime.BoxedUnit;
  * @see SparkActions#deleteOrphanFiles(Table)
  */
 public class RemoveOrphanFilesProcedure extends BaseProcedure {
+
+  static final String NAME = "remove_orphan_files";
+
   private static final Logger LOG = LoggerFactory.getLogger(RemoveOrphanFilesProcedure.class);
+
+  private static final ProcedureParameter TABLE_PARAM =
+      requiredInParameter("table", DataTypes.StringType);
+  private static final ProcedureParameter OLDER_THAN_PARAM =
+      optionalInParameter("older_than", DataTypes.TimestampType);
+  private static final ProcedureParameter LOCATION_PARAM =
+      optionalInParameter("location", DataTypes.StringType);
+  private static final ProcedureParameter DRY_RUN_PARAM =
+      optionalInParameter("dry_run", DataTypes.BooleanType);
+  private static final ProcedureParameter MAX_CONCURRENT_DELETES_PARAM =
+      optionalInParameter("max_concurrent_deletes", DataTypes.IntegerType);
+  private static final ProcedureParameter FILE_LIST_VIEW_PARAM =
+      optionalInParameter("file_list_view", DataTypes.StringType);
+  private static final ProcedureParameter EQUAL_SCHEMES_PARAM =
+      optionalInParameter("equal_schemes", STRING_MAP);
+  private static final ProcedureParameter EQUAL_AUTHORITIES_PARAM =
+      optionalInParameter("equal_authorities", STRING_MAP);
+  private static final ProcedureParameter PREFIX_MISMATCH_MODE_PARAM =
+      optionalInParameter("prefix_mismatch_mode", DataTypes.StringType);
+  // List files with prefix operations. Default is false.
+  private static final ProcedureParameter PREFIX_LISTING_PARAM =
+      optionalInParameter("prefix_listing", DataTypes.BooleanType);
 
   private static final ProcedureParameter[] PARAMETERS =
       new ProcedureParameter[] {
-        ProcedureParameter.required("table", DataTypes.StringType),
-        ProcedureParameter.optional("older_than", DataTypes.TimestampType),
-        ProcedureParameter.optional("location", DataTypes.StringType),
-        ProcedureParameter.optional("dry_run", DataTypes.BooleanType),
-        ProcedureParameter.optional("max_concurrent_deletes", DataTypes.IntegerType),
-        ProcedureParameter.optional("file_list_view", DataTypes.StringType),
-        ProcedureParameter.optional("equal_schemes", STRING_MAP),
-        ProcedureParameter.optional("equal_authorities", STRING_MAP),
-        ProcedureParameter.optional("prefix_mismatch_mode", DataTypes.StringType),
-        // List files with prefix operations. Default is false.
-        ProcedureParameter.optional("prefix_listing", DataTypes.BooleanType)
+        TABLE_PARAM,
+        OLDER_THAN_PARAM,
+        LOCATION_PARAM,
+        DRY_RUN_PARAM,
+        MAX_CONCURRENT_DELETES_PARAM,
+        FILE_LIST_VIEW_PARAM,
+        EQUAL_SCHEMES_PARAM,
+        EQUAL_AUTHORITIES_PARAM,
+        PREFIX_MISMATCH_MODE_PARAM,
+        PREFIX_LISTING_PARAM
       };
 
   private static final StructType OUTPUT_TYPE =
@@ -87,58 +112,38 @@ public class RemoveOrphanFilesProcedure extends BaseProcedure {
   }
 
   @Override
+  public BoundProcedure bind(StructType inputType) {
+    return this;
+  }
+
+  @Override
   public ProcedureParameter[] parameters() {
     return PARAMETERS;
   }
 
   @Override
-  public StructType outputType() {
-    return OUTPUT_TYPE;
-  }
-
-  @Override
   @SuppressWarnings("checkstyle:CyclomaticComplexity")
-  public InternalRow[] call(InternalRow args) {
-    Identifier tableIdent = toIdentifier(args.getString(0), PARAMETERS[0].name());
-    Long olderThanMillis = args.isNullAt(1) ? null : DateTimeUtil.microsToMillis(args.getLong(1));
-    String location = args.isNullAt(2) ? null : args.getString(2);
-    boolean dryRun = args.isNullAt(3) ? false : args.getBoolean(3);
-    Integer maxConcurrentDeletes = args.isNullAt(4) ? null : args.getInt(4);
-    String fileListView = args.isNullAt(5) ? null : args.getString(5);
+  public Iterator<Scan> call(InternalRow args) {
+    ProcedureInput input = new ProcedureInput(spark(), tableCatalog(), PARAMETERS, args);
+    Identifier tableIdent = input.ident(TABLE_PARAM);
+    Long olderThanMillis = input.asTimestampMillis(OLDER_THAN_PARAM, null);
+    String location = input.asString(LOCATION_PARAM, null);
+    boolean dryRun = input.asBoolean(DRY_RUN_PARAM, false);
+    Integer maxConcurrentDeletes = input.asInt(MAX_CONCURRENT_DELETES_PARAM, null);
+    String fileListView = input.asString(FILE_LIST_VIEW_PARAM, null);
 
     Preconditions.checkArgument(
         maxConcurrentDeletes == null || maxConcurrentDeletes > 0,
         "max_concurrent_deletes should have value > 0, value: %s",
         maxConcurrentDeletes);
 
-    Map<String, String> equalSchemes = Maps.newHashMap();
-    if (!args.isNullAt(6)) {
-      args.getMap(6)
-          .foreach(
-              DataTypes.StringType,
-              DataTypes.StringType,
-              (k, v) -> {
-                equalSchemes.put(k.toString(), v.toString());
-                return BoxedUnit.UNIT;
-              });
-    }
+    Map<String, String> equalSchemes = input.asStringMap(EQUAL_SCHEMES_PARAM, ImmutableMap.of());
+    Map<String, String> equalAuthorities =
+        input.asStringMap(EQUAL_AUTHORITIES_PARAM, ImmutableMap.of());
 
-    Map<String, String> equalAuthorities = Maps.newHashMap();
-    if (!args.isNullAt(7)) {
-      args.getMap(7)
-          .foreach(
-              DataTypes.StringType,
-              DataTypes.StringType,
-              (k, v) -> {
-                equalAuthorities.put(k.toString(), v.toString());
-                return BoxedUnit.UNIT;
-              });
-    }
+    PrefixMismatchMode prefixMismatchMode = asPrefixMismatchMode(input, PREFIX_MISMATCH_MODE_PARAM);
 
-    PrefixMismatchMode prefixMismatchMode =
-        args.isNullAt(8) ? null : PrefixMismatchMode.fromString(args.getString(8));
-
-    boolean prefixListing = args.isNullAt(9) ? false : args.getBoolean(9);
+    boolean prefixListing = input.asBoolean(PREFIX_LISTING_PARAM, false);
 
     return withIcebergTable(
         tableIdent,
@@ -190,7 +195,7 @@ public class RemoveOrphanFilesProcedure extends BaseProcedure {
 
           DeleteOrphanFiles.Result result = action.execute();
 
-          return toOutputRows(result);
+          return asScanIterator(OUTPUT_TYPE, toOutputRows(result));
         });
   }
 
@@ -222,7 +227,17 @@ public class RemoveOrphanFilesProcedure extends BaseProcedure {
   }
 
   @Override
+  public String name() {
+    return NAME;
+  }
+
+  @Override
   public String description() {
     return "RemoveOrphanFilesProcedure";
+  }
+
+  private PrefixMismatchMode asPrefixMismatchMode(ProcedureInput input, ProcedureParameter param) {
+    String modeAsString = input.asString(param, null);
+    return (modeAsString == null) ? null : PrefixMismatchMode.fromString(modeAsString);
   }
 }
